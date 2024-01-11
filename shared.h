@@ -8,20 +8,31 @@
 
 class ControlBlockBase {
 public:
-    ControlBlockBase() : ref_count_(1) {
-    }
+    ControlBlockBase() = default;
 
     size_t GetCount() const {
         return ref_count_;
     }
 
-    void Increment() {
+    void IncrementStrong() {
         ++ref_count_;
     }
 
-    void Decrement() {
+    void DecrementStrong() {
         if (--ref_count_ == 0) {
             OnZeroReferences();
+            if (weak_count_ == 0) {
+                delete this;
+            }
+        }
+    }
+
+    void IncrementWeak() {
+        ++weak_count_;
+    }
+
+    void DecrementWeak() {
+        if (--weak_count_ == 0 && ref_count_ == 0) {
             delete this;
         }
     }
@@ -32,7 +43,8 @@ protected:
     virtual void OnZeroReferences() = 0;
 
 private:
-    size_t ref_count_;
+    size_t ref_count_ = 1;
+    size_t weak_count_ = 0;
 };
 
 template <typename T>
@@ -43,44 +55,45 @@ public:
 
 protected:
     void OnZeroReferences() override {
-        delete data_ptr_;  // delete static_cast<T*>(data_ptr_);
+        delete data_ptr_;
     }
 
 private:
     T* data_ptr_;
 };
 
-;
-
 template <typename T>
 class ObjectControlBlock : public ControlBlockBase {
 public:
     template <typename... Args>
-    explicit ObjectControlBlock(Args&&... args) : obj_(std::forward<Args>(args)...) {
+    explicit ObjectControlBlock(Args&&... args) {
+        new (GetDataPtr()) T(std::forward<Args>(args)...);
     }
 
     T* GetDataPtr() {
-        return &obj_;
+        return reinterpret_cast<T*>(&storage_);
     }
 
 protected:
     void OnZeroReferences() override {
+        GetDataPtr()->~T();
     }
 
 private:
-    T obj_;
+    std::aligned_storage_t<sizeof(T), alignof(T)> storage_;
 };
 
 template <typename T>
 class SharedPtr {
-    template <typename Y>
-    friend class SharedPtr;
-
 private:
-    SharedPtr(T* ptr, ControlBlockBase* block) : data_ptr_(ptr), control_block_(block) {
-    }
     T* data_ptr_ = nullptr;
     ControlBlockBase* control_block_ = nullptr;
+
+    template <typename Y>
+    friend class WeakPtr;
+
+    template <typename Y>
+    friend class SharedPtr;
 
 public:
     template <typename Y, typename... Args>
@@ -103,14 +116,14 @@ public:
     SharedPtr(const SharedPtr<Y>& other)
         : data_ptr_(other.data_ptr_), control_block_(other.control_block_) {
         if (control_block_) {
-            control_block_->Increment();
+            control_block_->IncrementStrong();
         }
     }
 
     SharedPtr(const SharedPtr& other)
         : data_ptr_(other.data_ptr_), control_block_(other.control_block_) {
         if (control_block_) {
-            control_block_->Increment();
+            control_block_->IncrementStrong();
         }
     }
 
@@ -127,6 +140,8 @@ public:
         other.control_block_ = nullptr;
     }
 
+    SharedPtr(T* ptr, ControlBlockBase* block) : data_ptr_(ptr), control_block_(block) {
+    }
     // Aliasing constructor
     // #8 from https://en.cppreference.com/w/cpp/memory/shared_ptr/shared_ptr
 
@@ -134,7 +149,7 @@ public:
     SharedPtr(const SharedPtr<Y>& other, T* ptr)
         : data_ptr_(ptr), control_block_(other.control_block_) {
         if (control_block_) {
-            control_block_->Increment();
+            control_block_->IncrementStrong();
         }
     }
     // Promote `WeakPtr`
@@ -150,14 +165,14 @@ public:
         }
 
         if (control_block_) {
-            control_block_->Decrement();
+            control_block_->DecrementStrong();
         }
 
         data_ptr_ = other.data_ptr_;
         control_block_ = other.control_block_;
 
         if (control_block_) {
-            control_block_->Increment();
+            control_block_->IncrementStrong();
         }
 
         return *this;
@@ -169,7 +184,7 @@ public:
         }
 
         if (control_block_) {
-            control_block_->Decrement();
+            control_block_->DecrementStrong();
         }
 
         data_ptr_ = other.data_ptr_;
@@ -183,7 +198,7 @@ public:
     // Destructor
     ~SharedPtr() {
         if (control_block_) {
-            control_block_->Decrement();
+            control_block_->DecrementStrong();
         }
     }
     ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -191,7 +206,7 @@ public:
 
     void Reset() {
         if (control_block_) {
-            control_block_->Decrement();
+            control_block_->DecrementStrong();
         }
 
         data_ptr_ = nullptr;
@@ -205,7 +220,7 @@ public:
         }
 
         if (control_block_) {
-            control_block_->Decrement();
+            control_block_->DecrementStrong();
         }
 
         if (ptr) {
